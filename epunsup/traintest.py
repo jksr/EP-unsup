@@ -1,7 +1,48 @@
 import tqdm
+import pandas as pd
+
+
 import torch
 from torch import nn
+from torch.utils.data import Dataset, DataLoader
 from .SOMVAE import TrackEncoder, TrackDecoder, SOMVAE
+
+
+
+class SOMVAEDataset(Dataset):
+    def __init__(self, path, frameshape=(2,11), selpkid=None):
+        super().__init__()
+
+        self.oridf = pd.read_csv(path, sep='\t', index_col=0,
+                         names = ['chr','start','end','pkid','segnum','values'])
+        if selpkid is not None:
+            self.seldf = self.oridf[self.oridf['pkid'].isin(selpkid)]
+        else:
+            self.seldf = self.oridf
+
+        self.data = list(self.seldf.groupby('pkid'))
+        self.frameshape = frameshape
+
+    def __getitem__(self, index):
+        df = self.data[index][1]
+        return self.data[index][0],\
+                df['values'].str.split(',',expand=True).astype(float).values.reshape(-1,*self.frameshape)
+
+    def get_peak(self, pkids):
+        if isinstance(pkids, str):
+            pkids = [pkids]
+        return self.oridf[self.oridf['pkid'].isin(pkids)]
+    
+    def __len__(self):
+        return len(self.data)
+
+
+
+class SOMVAEDataLoader(DataLoader):
+    def __init__(self, dataset, shuffle):
+        super().__init__(dataset, batch_size=1, shuffle=shuffle)
+
+
 
 def construct_model(ntracks=2, ntimepoints=11, latent_dim=10, 
                     encoder_kernel_size=[3,3], encoder_strides=[1,1], encoder_hidden_channels=[5,5], 
@@ -31,6 +72,7 @@ def train(model, dataloader,
           model_decay_factor=0.9, prob_decay_factor=0.9, 
           model_decay_nsteps=1000, prob_decay_nsteps=1000, 
           nepoches=5, 
+          disable_tqdm=False,
           callbacks=[]):
     
     model_param_list = nn.ParameterList()
@@ -50,9 +92,9 @@ def train(model, dataloader,
     sc_opt_probs = torch.optim.lr_scheduler.StepLR(opt_probs, prob_decay_nsteps, prob_decay_factor)
     
 
-    for e in tqdm.notebook.tqdm(range(nepoches), desc="Epoch", position=0):
+    for e in tqdm.notebook.tqdm(range(nepoches), desc="Epoch", position=0, disable=False):
         for i,(pkid, batch_x) in tqdm.notebook.tqdm(enumerate(dataloader), desc="step", 
-                                                    position=1, leave=False):
+                                                    position=1, leave=False, disable=disable_tqdm):
             batch_x = batch_x.squeeze(0).float()
             opt_model.zero_grad()
             opt_probs.zero_grad()
@@ -75,10 +117,10 @@ def train(model, dataloader,
 
 
 
-def test(model, dataloader, callbacks=[]):
+def test(model, dataloader, disable_tqdm=False, callbacks=[]):
     
     with torch.no_grad():
-        for i,(pkid, batch_x) in tqdm.notebook.tqdm(enumerate(dataloader), desc="step"):
+        for i,(pkid, batch_x) in tqdm.notebook.tqdm(enumerate(dataloader), desc="step", disable=disable_tqdm):
             batch_x = batch_x.squeeze(0).float()
             x_e, x_q, z_e, z_q, z_q_neighbors, k, z_dist_flat = model(batch_x)
             l = model.loss(batch_x, x_e, x_q, z_e, z_q, z_q_neighbors, k, z_dist_flat)
